@@ -8,6 +8,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.runtime.exceptions.unrecoverable.UnrecoverableCorfuError;
 import org.corfudb.util.serializer.ISerializer;
+import org.rocksdb.CompactionOptionsUniversal;
+import org.rocksdb.CompressionType;
 import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.Options;
@@ -22,8 +24,11 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.Spliterator;
+import java.util.Spliterators;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
 /**
  * A concrete implementation of {@link StreamingMap} that is capable of storing data
@@ -38,6 +43,37 @@ public class PersistedStreamingMap<K, V> implements ContextAwareMap<K, V> {
 
     static {
         RocksDB.loadLibrary();
+    }
+
+    /**
+     * A set of options defined for disk-backed {@link CorfuTable}.
+     *
+     * For a set of options that dictate RocksDB memory usage can be found here:
+     * https://github.com/facebook/rocksdb/wiki/Memory-usage-in-RocksDB
+     *
+     * Block Cache:  Which can be set via Options::setTableFormatConfig.
+     *               Out of box, RocksDB will use LRU-based block cache
+     *               implementation with 8MB capacity.
+     * Index/Filter: Is a function of the block cache. Generally it infates
+     *               the block cache by about 50%. The exact number can be
+     *               retrieved via "rocksdb.estimate-table-readers-mem"
+     *               property.
+     * Write Buffer: Also known as memtable is defined by the ColumnFamilyOptions
+     *               option. The default is 64 MB.
+     */
+    public static Options getPersistedStreamingMapOptions() {
+        final int maxSizeAmplificationPercent = 50;
+        final Options options = new Options();
+
+        options.setCreateIfMissing(true);
+        options.setCompressionType(CompressionType.LZ4_COMPRESSION);
+
+        // Set a threshold at which full compaction will be triggered.
+        // This is important as it purges tombstoned entries.
+        final CompactionOptionsUniversal compactionOptions = new CompactionOptionsUniversal();
+        compactionOptions.setMaxSizeAmplificationPercent(maxSizeAmplificationPercent);
+        options.setCompactionOptionsUniversal(compactionOptions);
+        return options;
     }
 
     private final ContextAwareMap<K, V> optimisticMap = new StreamingMapDecorator<>();
@@ -58,79 +94,6 @@ public class PersistedStreamingMap<K, V> implements ContextAwareMap<K, V> {
         }
         this.serializer = serializer;
         this.corfuRuntime = corfuRuntime;
-    }
-
-    /**
-     * A Java compatible {@link RocksIterator} implementation
-     */
-    public class RocksDbIterator implements Iterator<Entry<K, V>> {
-        private RocksIterator iterator;
-        private Entry<K, V> current;
-        private Entry<K, V> next;
-
-        RocksDbIterator(RocksIterator iterator) {
-            this.iterator = iterator;
-        }
-
-        /**
-         * Ensure that this iterator is operating under the correct assumptions.
-         */
-        private void checkInvariants() {
-            // RocksDB does not support multi-threaded access.
-            // If the iterator was created by some thread, it also has to be consumed by it.
-            if (!iterator.isOwningHandle()) {
-                throw new IllegalStateException("Detected multi-threaded access to this iterator.");
-            }
-
-            try {
-                iterator.status();
-            } catch (RocksDBException e) {
-                throw new UnrecoverableCorfuError(
-                        "There was an error reading the persisted map.", e);
-            }
-        }
-
-        /**
-         * {@inheritDoc}
-         */
-        @Override
-        public boolean hasNext() {
-            // If we have the next element pipelined, go ahead and return true.
-            if (next != null) {
-                return true;
-            }
-
-            // If the iterator is valid, this means that the next entry exists.
-            checkInvariants();
-            if (iterator.isValid()) {
-                // Go ahead and cache that entry.
-                next = new AbstractMap.SimpleEntry(
-                        serializer.deserialize(Unpooled.wrappedBuffer(iterator.key()), corfuRuntime),
-                        serializer.deserialize(Unpooled.wrappedBuffer(iterator.value()), corfuRuntime));
-                // Advance the underlying iterator.
-                iterator.next();
-            } else {
-                // If there is no more elements to consume, we should release the resources.
-                iterator.close();
-            }
-
-            return next != null;
-        }
-
-        /**
-         * {@inheritDoc}
-         */
-        @Override
-        public Entry<K, V> next() {
-            if (hasNext()) {
-                current = next;
-                next = null;
-                return current;
-            } else {
-                throw new NoSuchElementException();
-            }
-
-        }
     }
 
     /**
@@ -318,9 +281,11 @@ public class PersistedStreamingMap<K, V> implements ContextAwareMap<K, V> {
         // If it is nullptr, the iterator will read from an implicit snapshot as of the time the
         // iterator is created. The implicit snapshot is preserved by pinning resource.
         readOptions.setSnapshot(null);
-        final RocksIterator rocksIterator = rocksDb.newIterator(readOptions);
-        rocksIterator.seekToFirst();
-        return Streams.stream(new RocksDbIterator(rocksIterator));
+        final RocksDbEntryIterator entryIterator = new RocksDbEntryIterator(rocksDb.newIterator(readOptions), serializer);
+        Stream<Entry<K, V>> resStream = StreamSupport.stream(
+                Spliterators.spliteratorUnknownSize(entryIterator, Spliterator.ORDERED), false);
+        resStream.onClose(entryIterator::close);
+        return resStream;
     }
 
     /**

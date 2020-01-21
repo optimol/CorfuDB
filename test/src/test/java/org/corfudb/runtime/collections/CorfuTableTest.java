@@ -1,21 +1,31 @@
 package org.corfudb.runtime.collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
+
+import com.google.common.collect.Iterables;
 import com.google.common.reflect.TypeToken;
 
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.ConcurrentModificationException;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import org.assertj.core.api.Assertions;
 import org.assertj.core.data.MapEntry;
+import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.runtime.exceptions.unrecoverable.UnrecoverableCorfuError;
+import org.corfudb.runtime.object.ICorfuVersionPolicy;
 import org.corfudb.runtime.view.AbstractViewTest;
+import org.corfudb.util.serializer.Serializers;
 import org.junit.Test;
 
 public class CorfuTableTest extends AbstractViewTest {
@@ -244,5 +254,48 @@ public class CorfuTableTest extends AbstractViewTest {
 
         final Stream<Map.Entry<Integer, Integer>> result = map.entryStream();
         result.forEach(e -> map.put(new Random().nextInt(), 0));
+    }
+
+    @Test
+    public void PersistedCorfuTableTests() {
+        String path = PARAMETERS.TEST_TEMP_DIR;
+
+        CorfuRuntime rt = getDefaultRuntime();
+
+        UUID tableId = UUID.randomUUID();
+        Supplier<StreamingMap<String, String>> mapSupplier = () ->
+                new PersistedStreamingMap<>(Paths.get(path + tableId),
+                        PersistedStreamingMap.getPersistedStreamingMapOptions(),
+                        Serializers.JSON, rt);
+
+        CorfuTable<String, String> diskBackedMap = rt.getObjectsView()
+                .build()
+                .setTypeToken(new TypeToken<CorfuTable<String, String>>() {})
+                .streamID(tableId)
+                .setSerializer(Serializers.JSON)
+                .setArguments(mapSupplier, ICorfuVersionPolicy.MONOTONIC)
+                .open();
+
+        final int numKeys = 1002;
+        for (int x = 0; x < numKeys; x++) {
+            diskBackedMap.put(String.valueOf(x), "payload" + x);
+        }
+
+        Map<String, String> result = new HashMap<>(numKeys);
+
+        Stream<Map.Entry<String, String>> stream = diskBackedMap.entryStream();
+        final Iterable<List<Map.Entry<String, String>>> partitions = Iterables.partition(stream::iterator, 50);
+
+        for (List<Map.Entry<String, String>> partition : partitions) {
+            for (Map.Entry<String, String> entry : partition) {
+                result.put(entry.getKey(), entry.getValue());
+            }
+        }
+
+        assertThat(diskBackedMap.size()).isEqualTo(numKeys);
+        assertThat(result.size()).isEqualTo(numKeys);
+        for (Map.Entry<String, String> entry : result.entrySet()) {
+            assertThat(diskBackedMap.get(entry.getKey())).isEqualTo(diskBackedMap.get(entry.getKey()));
+        }
     }
 }
