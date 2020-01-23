@@ -30,8 +30,12 @@ message TableMetadata {
     TableName table_name = 1;
     // True if the CorfuStore is disk based and False if it can be contained in memory.
     bool disk_based = 2;
+
+    // Full path to disk based location if this table is disk based
+    string disk_based_path = 3;
+
     // True if these streams are to be cached, False otherwise.
-    bool cache = 3;
+    bool cache = 4;
 }
 
 // Record to be persisted containing the value and the metadata.

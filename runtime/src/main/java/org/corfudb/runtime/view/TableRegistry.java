@@ -19,6 +19,7 @@ import java.util.stream.Collectors;
 import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.runtime.CorfuStoreMetadata.TableDescriptors;
 import org.corfudb.runtime.CorfuStoreMetadata.TableName;
+import org.corfudb.runtime.CorfuStoreMetadata.TableMetadata;
 import org.corfudb.runtime.collections.CorfuRecord;
 import org.corfudb.runtime.collections.CorfuTable;
 import org.corfudb.runtime.collections.PersistedStreamingMap;
@@ -100,6 +101,7 @@ public class TableRegistry {
         // Register the table schemas to schema table.
         addTypeToClassMap(TableName.getDefaultInstance());
         addTypeToClassMap(TableDescriptors.getDefaultInstance());
+        addTypeToClassMap(TableMetadata.getDefaultInstance());
 
         // Register the registry table itself.
         try {
@@ -107,7 +109,8 @@ public class TableRegistry {
                     REGISTRY_TABLE_NAME,
                     TableName.class,
                     TableDescriptors.class,
-                    null);
+                    TableMetadata.class,
+                    TableOptions.<TableName, TableDescriptors>builder().build());
         } catch (NoSuchMethodException | InvocationTargetException | IllegalAccessException e) {
             throw new RuntimeException(e);
         }
@@ -133,7 +136,8 @@ public class TableRegistry {
                        @Nonnull String tableName,
                        @Nonnull Class<K> keyClass,
                        @Nonnull Class<V> payloadClass,
-                       @Nullable Class<M> metadataClass)
+                       @Nullable Class<M> metadataClass,
+                       @Nonnull final TableOptions<K, V> tableOptions)
             throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
 
         TableName tableNameKey = TableName.newBuilder()
@@ -158,10 +162,15 @@ public class TableRegistry {
         }
         TableDescriptors tableDescriptors = tableDescriptorsBuilder.build();
 
+        TableMetadata.Builder metadataBuilder = TableMetadata.newBuilder();
+        metadataBuilder.setDiskBased(tableOptions.getPersistentDataPath().isPresent());
+        if (tableOptions.getPersistentDataPath().isPresent()) {
+            metadataBuilder.setDiskBasedPath(tableOptions.getPersistentDataPath().toString());
+        }
         try {
             this.runtime.getObjectsView().TXBuild().type(TransactionType.OPTIMISTIC).build().begin();
             this.registryTable.putIfAbsent(tableNameKey,
-                    new CorfuRecord<>(tableDescriptors, null));
+                    new CorfuRecord<>(tableDescriptors, metadataBuilder.build()));
         } finally {
             this.runtime.getObjectsView().TXEnd();
         }
@@ -331,7 +340,7 @@ public class TableRegistry {
                 mapSupplier, versionPolicy);
         tableMap.put(fullyQualifiedTableName, (Table<Message, Message, Message>) table);
 
-        registerTable(namespace, tableName, kClass, vClass, mClass);
+        registerTable(namespace, tableName, kClass, vClass, mClass, tableOptions);
         return table;
     }
 
