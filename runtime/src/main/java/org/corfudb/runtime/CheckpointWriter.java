@@ -241,6 +241,9 @@ public class CheckpointWriter<T extends StreamingMap> {
      * @return Stream of global log addresses of the CONTINUATION records written.
      */
     public int appendObjectState(Stream<Map.Entry> entryStream) {
+        long totalReadTime = 0; // includes read and compaction
+        long totalWriteTime = 0;
+
         ImmutableMap<CheckpointEntry.CheckpointDictKey, String> mdkv =
                 ImmutableMap.copyOf(this.mdkv);
 
@@ -249,6 +252,7 @@ public class CheckpointWriter<T extends StreamingMap> {
         int entryCount = 0;
 
         for (List<Map.Entry> partition : partitions) {
+            final long readStart = System.currentTimeMillis();
             MultiSMREntry smrEntries = new MultiSMREntry();
             for (Map.Entry entry : partition) {
                 smrEntries.addTo(new SMREntry("put",
@@ -257,11 +261,15 @@ public class CheckpointWriter<T extends StreamingMap> {
                         serializer));
                 entryCount++;
             }
+            totalReadTime += System.currentTimeMillis() - readStart;
 
             CheckpointEntry cp = new CheckpointEntry(CheckpointEntry
                     .CheckpointEntryType.CONTINUATION,
                     author, checkpointId, streamId, mdkv, smrEntries);
+            final long writeStart = System.currentTimeMillis();
             long pos = nonCachedAppend(cp, checkpointStreamID);
+            totalWriteTime += System.currentTimeMillis() - writeStart;
+
             postAppendFunc.accept(cp, pos);
             numEntries++;
             // CheckpointEntry::serialize() has a side-effect we use
@@ -269,6 +277,8 @@ public class CheckpointWriter<T extends StreamingMap> {
             numBytes += cp.getSmrEntriesBytes();
         }
 
+        log.info("Total read time: {}, total write time: {}",
+                totalReadTime, totalWriteTime);
         return entryCount;
     }
 
