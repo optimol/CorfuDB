@@ -158,18 +158,27 @@ public class CheckpointWriter<T extends StreamingMap> {
             // A checkpoint writer will do two accesses one to obtain the object
             // vlo version and to get a shallow copy of the entry set
             log.info("appendCheckpoint: Started checkpoint for {} at snapshot {}", streamId, snapshotTimestamp);
+
+            final long readStart = System.currentTimeMillis();
             Stream<Map.Entry> entries = this.map.entryStream();
+            final long readTime = System.currentTimeMillis() - readStart;
+            log.info("Total read time: {}", readTime);
+
             // The vloVersion which will determine the checkpoint START_LOG_ADDRESS (last observed update for this
             // stream by the time of checkpointing) is defined by the stream's tail instead of the stream's version,
             // as the latter discards holes for resolution, hence if last address is a hole it would diverge
             // from the stream address space maintained by the sequencer.
+            final long writeStart = System.currentTimeMillis();
             startCheckpoint(snapshotTimestamp);
             int entryCount = appendObjectState(entries);
             finishCheckpoint();
-            long cpDuration = System.currentTimeMillis() - start;
+            final long endTime = System.currentTimeMillis();
+            final long writeTime = endTime - writeStart;
+            final long cpDuration = endTime - start;
             log.info("appendCheckpoint: completed checkpoint for {}, entries({}), " +
                             "cpSize({}) bytes at snapshot {} in {} ms",
                     streamId, entryCount, numBytes, snapshotTimestamp, cpDuration);
+            log.info("Read time: {}, write time: {}", readTime, writeTime);
         } finally {
             rt.getObjectsView().TXEnd();
         }
